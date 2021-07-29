@@ -1,0 +1,129 @@
+"""
+
+"""
+
+import boto3
+import base64
+from botocore.exceptions import ClientError
+
+with open("serverscript_base64.txt", "r") as fp:        ##----------
+    SERVERSCRIPT_B64_STR = fp.read()
+
+class CreateInstanceEC2(object):
+    def __init__(self, ec2_client):
+        self.ec2_client=ec2_client
+        
+##---------fetching the info on  the vpcid ,subnetid and availability zones-----##
+
+    def grep_vpc_subnet_id(self):
+        output = self.ec2_client.describe_vpcs()
+        for vpc in response["Vpcs"]:
+                vpc_id = vpc["VpcId"]
+
+        output = self.ec2_client.describe_subnets(Filters=[{"Name":"vpc-id", "Values": [vpc_id]}])
+        subnet_id = response["Subnets"][0]["SubnetId"]
+        az = output["Subnets"][0]["AvailabilityZone"]
+        return vpc_id, subnet_id, az
+
+##-----------creating a security group and ssome inbound rules has been set-------##
+
+    def create_ec2_security_group(self):
+        secgroup_name = "assignmnet7_security_group"
+        print("Creating Security Group {} : STARTED ".format(secgroup_name))
+        try:
+            vpc_id, subnet_id, az = self.grep_vpc_subnet_id()
+            response = self.ec2_client.create_security_group(
+                GroupName=secgroup_name,
+                Description="This SG is created using Python",
+                VpcId=vpc_id
+            )
+            secgroup_id = response["GroupId"]
+            secgroup_config = self.ec2_client.authorize_security_group_ingress(
+                GroupId=secgroup_id,
+                IpPermissions=[
+                    {
+                        'IpProtocol': 'tcp',
+                        'FromPort': 22,
+                        'ToPort':22,
+                        'IpRanges':[{'CidrIp':'0.0.0.0/0'}]
+                    },
+                    {
+                        'IpProtocol': 'tcp',
+                        'FromPort': 80,
+                        'ToPort': 80,
+                        'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                    }
+                ]
+            )
+            print("Security Group creation {} : COMPLETED - Security Group ID: {} ".format(secgroup_name, secgroup_id))
+            return secgroup_id, secgroup_name
+        #except Exception as e:
+            #if str(e).__contains__("already exists"):
+                #output = self.ec2_client.describe_security_groups(GroupNames=[secgroup_name])
+                #secgroup_id = output["SecurityGroups"][0]["GroupId"]
+                #print("Security Group {} already exists with Security Group ID: {} ".format(secgroup_name, secgroup_id))
+                #return secgroup_id, secgroup_name
+
+##-------------creating a launch template with required user data ----##
+
+    def create_ec2_launch_template(self):
+        print(" Launch Templates creation : STARTED ")
+        template_name = 'assignmnet7_launch_template'
+        try:
+            secgroup_id, secgroup_name = self.create_ec2_security_group()
+            response = self.ec2_client.create_launch_template(
+                LaunchTemplateName=template_name,
+                LaunchTemplateData={
+                    'ImageId': 'ami-08e0ca9924195beba',
+                    'InstanceType' : "t2.micro",
+                    'KeyName' : "ec2-key",
+                    'UserData': SERVERSCRIPT_B64_STR,
+                    'SecurityGroupIds': [secgroup_id]
+                }
+            )
+            template_id = response['LaunchTemplate']['LaunchTemplateId']
+            print(" Launch Templates creation : COMPLETED : TemplateID:{}, TemplateName:{}".format(template_id, template_name ))
+            return template_id, template_name
+        except Exception as e:
+            output = self.ec2_client.describe_launch_templates(
+                LaunchTemplateNames=[
+                    template_name,
+                ]
+            )
+            template_id = output['LaunchTemplates'][0]['LaunchTemplateId']
+            return template_id, template_name
+
+##-----creating a autoscaling group and then attaching the above creted launch template to it-----##
+
+    def create_ec2_auto_scaling_group(self): 
+        print ("--- creating of Auto Scaling Group using Launch Template ----")
+        launch_template_id, launch_template_name = self.create_ec2_launch_template()
+        vpc_id, subnet_id, az = self.grep_vpc_subnet_id()
+        client = boto3.client('autoscaling')
+        response = client.create_auto_scaling_group(
+            AutoScalingGroupName='awspy_autoscaling_group',
+            LaunchTemplate={
+                'LaunchTemplateId': launch_template_id,
+            },
+            MinSize=1,
+            MaxSize=3,
+            DesiredCapacity=2,
+            AvailabilityZones=[
+                az,
+            ]
+        )
+
+        #if str(response["ResponseMetadata"]["HTTPStatusCode"]) == "200":
+            #print("---- Creation of Auto Scaling Group using Launch Templates : COMPLETED ----")
+        #else:
+            #print("---- Creation of Auto Scaling Group using Launch Templates : FAILED ----")
+        #return True
+
+
+##----------------calling all the above functions------------##
+try:
+    ec2_client = boto3.client('ec2')
+    call_obj = CreateInstanceEC2(ec2_client)
+    call_obj.create_ec2_auto_scaling_group()
+except ClientError as e:
+    print(e)
